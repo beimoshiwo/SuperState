@@ -1,0 +1,19 @@
+# ---- 构建产物（SwiftPM 缓存 / 编译输出，体积巨大，切勿入库）----
+.build/
+.build/**
+
+# ---- 编译出的 kext 二进制（由 Kext/build_kext.sh 生成，源码 .cpp/.sh/.plist 仍保留）----
+Kext/SuperStateKext.kext/
+
+# ---- 打包输出（位于仓库外的 产品/ 目录；若误放入则忽略）----
+产品/
+
+# ---- 助手内部记忆（含个人/项目敏感信息，严禁上传）----
+.workbuddy/
+
+# ---- macOS 杂项 / 编译中间文件 ----
+.DS_Store
+*.o
+*.pcm
+*.swiftmodule
+*.dSYM/
