@@ -97,7 +97,7 @@ rm -f "$DMG"
 
 # 优先 dmgbuild（Python，直接写 .DS_Store 布局，无需 Finder 自动化权限）：
 # 窗口背景"拖动到应用程序"提示图 + 图标定位 + App 图标作卷宗图标
-PYENV="/Users/beimo/.workbuddy/binaries/python/envs/default/bin/python3"
+PYENV="${PYTHON3:-python3}"  # 打包脚本内嵌的个人路径已移除；如需指定解释器，用 PYTHON3 环境变量
 DMGBUILD_OK=0
 if [ "$BG_OK" = "1" ] && [ -x "$PYENV" ] && "$PYENV" -c "import dmgbuild" 2>/dev/null; then
   hdiutil detach "/Volumes/$APP_NAME" -force -quiet 2>/dev/null || true
