@@ -1,6 +1,8 @@
 #!/bin/bash
 # SuperStateKext 安装脚本（需一次性管理员授权）
-# 1) 拷贝到 /Library/Extensions 2) 加载进内核 3) 安装开机自加载 LaunchDaemon
+# 安全顺序（最高优先级 = 不弄坏系统）：
+#   1) 先卸载可能正在运行的内核扩展（含旧版本），确保无用户客户端占用、无已加载镜像；
+#   2) 再删除旧副本；3) 拷入新版；4) 加载新版；5) 注册开机自加载。
 set -e
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -10,16 +12,20 @@ DAEMON="/Library/LaunchDaemons/com.superstate.kextload.plist"
 
 [ -d "$KEXT" ] || { echo "找不到 $KEXT"; exit 1; }
 
-echo "==> 安装到 $DEST"
+echo "==> 先卸载可能正在运行（含旧版本）的内核扩展"
+# 先按路径卸载（旧副本仍在磁盘上，路径有效），再按 bundle-id 兜底
+kmutil unload -p "$DEST" 2>/dev/null || true
+kmutil unload -b com.superstate.kext 2>/dev/null || true
+
+echo "==> 删除已安装副本"
 rm -rf "$DEST"
+
+echo "==> 安装到 $DEST"
 cp -R "$KEXT" "$DEST"
 chown -R root:wheel "$DEST"
 chmod -R 755 "$DEST"
 
-echo "==> 加载内核扩展"
-# 先卸载旧版本（如存在）
-kmutil unload -p "$DEST" 2>/dev/null || true
-# 重建扩展集合并加载
+echo "==> 重建扩展集合并加载新版"
 kmutil load -p "$DEST"
 
 echo "==> 安装开机自加载服务"

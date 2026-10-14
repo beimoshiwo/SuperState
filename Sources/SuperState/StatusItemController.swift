@@ -173,6 +173,11 @@ final class StatusItemController: NSObject {
         }
     }
 
+    /// 供全局热键调用：切换状态面板显示/隐藏
+    func togglePanelFromHotkey() {
+        togglePopover(nil)
+    }
+
     // MARK: - 菜单
 
     private func buildMenu() {

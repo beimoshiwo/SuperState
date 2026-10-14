@@ -16,6 +16,36 @@ final class KextMetrics {
     private var conn: io_connect_t = 0
     private(set) var isAvailable = false
 
+    // MARK: 睡眠/唤醒暂停门（用户态护栏，不碰 kext）
+    //
+    // 背景：本机 OCLP 3.0 内测版的 GPU 驱动补丁不成熟，休眠→唤醒时 GPU 电源态剧烈
+    // 切换、驱动重初始化。方法 3（iGPU MMIO）的 TOCTOU 竞态在此窗口暴露最大——
+    // v9 的双重守卫已让常见坏结果非致命，但"按最坏情况设计"要求连这个窗口也不赌：
+    // 睡眠期间 + 唤醒后过渡窗口内暂停一切 kext 读取，宁可显示「–/待机」
+    // （SMC/标称值兜底，功能不中断），也不在电源态churn 时碰设备内存。
+    // 所有读写都在主线程（Monitor tick / 通知回调），无需加锁。
+    private var readsSuspended = false        // 系统睡眠期间
+    private var wakeSettleUntil: UInt64 = 0   // 唤醒后过渡窗口截止（uptimeNanoseconds）
+
+    /// 当前是否暂停读取（睡眠中或唤醒过渡窗口内）
+    var isSuspended: Bool {
+        if readsSuspended { return true }
+        return DispatchTime.now().uptimeNanoseconds < wakeSettleUntil
+    }
+
+    /// 系统即将睡眠/已唤醒（NSWorkspace 通知，主线程）
+    func setSleeping(_ sleeping: Bool) {
+        readsSuspended = sleeping
+        // 睡眠跨越时间未知，RAPL 差分基线必然失效：清空，恢复后首次采样重建
+        lastRapl = nil
+    }
+
+    /// 唤醒后延长过渡窗口（秒）：等 GPU 驱动重初始化完成再恢复读取
+    func extendWakeSettle(_ seconds: TimeInterval) {
+        wakeSettleUntil = DispatchTime.now().uptimeNanoseconds + UInt64(seconds * 1_000_000_000)
+        lastRapl = nil   // 同上：过渡窗口后的第一次差分无效，重建基线
+    }
+
     // RAPL 上一采样（能量计数 + 时间戳），用于差分求功率
     private struct RaplSample {
         var pkg: UInt32 = 0
@@ -34,7 +64,7 @@ final class KextMetrics {
     private static let kMethodReadGPUFreq: UInt32 = 3
 
     /// App 期望的驱动接口版本（与 Kext/SuperStateKext.cpp 的 kSuperStateKextInterfaceVersion 对应）
-    static let expectedKextVersion: UInt32 = 5
+    static let expectedKextVersion: UInt32 = 9
     private static let kRaplStructSize = 6 * 4        // pkg/pp0/pp1/dram/esuShift/validMask（6×UInt32）
 
     private init() {
@@ -121,7 +151,7 @@ final class KextMetrics {
 
     /// 返回每个逻辑 CPU 的实时频率 MHz（kext 逐核读取，App 轮流绑定采集）
     func readFreqMHz() -> [Double]? {
-        guard isAvailable else { return nil }
+        guard isAvailable, !isSuspended else { return nil }
         let ncpu = max(1, ProcessInfo.processInfo.activeProcessorCount)
         var byId: [Int: Double] = [:]
         let thread = mach_thread_self()
@@ -159,7 +189,7 @@ final class KextMetrics {
     /// 方法 3：kext 读核显图形 MMIO 的 RPSTAT1，返回实时频率 MHz；
     /// 不支持/不可读时返回 nil（界面显示"待机"）。fail-safe。
     func readIGPUFreqMHz() -> Double? {
-        guard isAvailable else { return nil }
+        guard isAvailable, !isSuspended else { return nil }
         var out = [UInt8](repeating: 0, count: 8)   // uint32 mhz + uint32 supported
         var outSize = out.count
         let kr = out.withUnsafeMutableBytes { buf in
@@ -185,7 +215,7 @@ final class KextMetrics {
     /// 读取并差分出实时功率（W）；首次调用返回 nil（需要两次采样）
     func readPower() -> Power {
         var p = Power()
-        guard isAvailable else { return p }
+        guard isAvailable, !isSuspended else { return p }
         var out = [UInt8](repeating: 0, count: Self.kRaplStructSize)
         var outSize = out.count
         let kr = out.withUnsafeMutableBytes { buf in

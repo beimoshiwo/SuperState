@@ -90,6 +90,7 @@ struct SettingsView: View {
     private let tabs: [(id: Int, title: String, icon: String)] = [
         (0, "仪表盘", "gauge.with.dots.needle.67percent"),
         (1, "硬件参数", "cpu"),
+        (7, "CPU-Z", "magnifyingglass"),
         (2, "监控项目", "list.bullet"),
         (3, "告警", "bell"),
                 (4, "功能", "fanblades.fill"),
@@ -105,6 +106,7 @@ struct SettingsView: View {
             Group {
                 switch selectedTab {
                 case 1: HardwareView()
+                case 7: CPUZView()
                 case 2: monitorTab
                 case 3: alertTab
                 case 4: FeaturesView()

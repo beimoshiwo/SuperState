@@ -48,6 +48,14 @@ struct HWNetworkInfo {
     var ipv4: [String] = []
 }
 
+/// 硬件概览（SPHardwareDataType）：机型名 / 固件 / SMC / UUID
+struct HWSysInfo {
+    var modelName: String? = nil        // "MacBook Pro"
+    var firmwareVersion: String? = nil  // System Firmware Version（Boot ROM）
+    var smcVersion: String? = nil       // SMC Version
+    var hardwareUUID: String? = nil     // Hardware UUID
+}
+
 /// 硬件参数探测器：应用启动时后台采集一次（system_profiler 约 2~4 秒），结果缓存
 final class HardwareInfo: ObservableObject {
 
@@ -57,6 +65,7 @@ final class HardwareInfo: ObservableObject {
     @Published private(set) var storages: [HWStorageInfo] = []
     @Published private(set) var displays: [HWDisplayInfo] = []
     @Published private(set) var networks: [HWNetworkInfo] = []
+    @Published private(set) var sys: HWSysInfo?
     @Published private(set) var loaded = false
 
     private init() {}
@@ -64,12 +73,13 @@ final class HardwareInfo: ObservableObject {
     func load() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let battery = Self.readBattery()
-            let (storages, displays, networks) = Self.readSystemProfiler()
+            let (storages, displays, networks, sys) = Self.readSystemProfiler()
             DispatchQueue.main.async {
                 self?.battery = battery
                 self?.storages = storages
                 self?.displays = displays
                 self?.networks = networks
+                self?.sys = sys
                 self?.loaded = true
             }
         }
@@ -120,21 +130,22 @@ final class HardwareInfo: ObservableObject {
 
     // MARK: - 存储 / 显示 / 网络（system_profiler）
 
-    private static func readSystemProfiler() -> ([HWStorageInfo], [HWDisplayInfo], [HWNetworkInfo]) {
+    private static func readSystemProfiler() -> ([HWStorageInfo], [HWDisplayInfo], [HWNetworkInfo], HWSysInfo?) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-        task.arguments = ["SPStorageDataType", "SPDisplaysDataType", "SPNetworkDataType"]
+        task.arguments = ["SPStorageDataType", "SPDisplaysDataType", "SPNetworkDataType", "SPHardwareDataType"]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = Pipe()
-        do { try task.run() } catch { return ([], [], []) }
+        do { try task.run() } catch { return ([], [], [], nil) }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
-        guard let text = String(data: data, encoding: .utf8) else { return ([], [], []) }
+        guard let text = String(data: data, encoding: .utf8) else { return ([], [], [], nil) }
 
         var storages: [HWStorageInfo] = []
         var displays: [HWDisplayInfo] = []
         var networks: [HWNetworkInfo] = []
+        var sys = HWSysInfo()
         var section = ""
         var curStorage: HWStorageInfo?
         var curChipset = ""
@@ -169,7 +180,8 @@ final class HardwareInfo: ObservableObject {
             if line == "Storage:" { flushStorage(); section = "storage"; continue }
             if line == "Displays:" { flushDisplay(); section = "display"; continue }
             if line == "Network:" { flushNetwork(); section = "network"; continue }
-            if line == "Software:" || line == "Hardware:" { continue }
+            if line == "Hardware:" { section = "hardware"; continue }
+            if line == "Software:" { continue }
 
             switch section {
             case "storage":
@@ -217,11 +229,21 @@ final class HardwareInfo: ObservableObject {
                 } else if line.hasPrefix("IPv4 Addresses:") {
                     curNetwork?.ipv4 = value(line).split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
                 }
+            case "hardware":
+                if line.hasPrefix("Model Name:") {
+                    sys.modelName = value(line)
+                } else if line.hasPrefix("System Firmware Version:") {
+                    sys.firmwareVersion = value(line)
+                } else if line.hasPrefix("SMC Version") {
+                    sys.smcVersion = value(line)
+                } else if line.hasPrefix("Hardware UUID:") {
+                    sys.hardwareUUID = value(line)
+                }
             default: break
             }
         }
         flushStorage(); flushDisplay(); flushNetwork()
-        return (storages, displays, networks)
+        return (storages, displays, networks, sys)
     }
 
     /// "Capacity: 62.34 GB (62,344,265,728 bytes)" → 62344265728

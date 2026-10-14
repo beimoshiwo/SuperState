@@ -136,12 +136,19 @@ final class SmcClient {
     // MARK: 写入（风扇控制）
 
     /// 写 SMC 键（command 6 = WriteKey）。仅用于风扇控制，写前必须确认键存在。
+    /// 注意：本机实测（macOS 26 + AppleSMC 3.1.9）非特权进程的 WriteKey 一律返回
+    /// kIOReturnNotPrivileged (0xE00002C1)，调用方需按 kr 决定是否走管理员通道。
     @discardableResult
     func writeRaw(_ name: String, data: [UInt8]) -> Bool {
+        writeRawStatus(name, data: data).ok
+    }
+
+    /// 同 writeRaw，但返回原始 IOReturn，供调用方区分「权限不足」与其他失败
+    func writeRawStatus(_ name: String, data: [UInt8]) -> (ok: Bool, kr: kern_return_t) {
         let key = Self.fourCC(name)
-        guard let info = call(command: 9, key: key) else { return false }
+        guard let info = call(command: 9, key: key) else { return (false, kIOReturnNotFound) }
         let size = Int(info[Self.offDataSize])
-        guard size > 0, data.count == size else { return false }
+        guard size > 0, data.count == size else { return (false, kIOReturnBadArgument) }
         var input = [UInt8](repeating: 0, count: Self.structSize)
         input[Self.offKey]     = UInt8(key & 0xff)
         input[Self.offKey + 1] = UInt8((key >> 8) & 0xff)
@@ -157,14 +164,7 @@ final class SmcClient {
         let kr = IOConnectCallStructMethod(conn, Self.mainSelector,
                                            &input, Self.structSize,
                                            &output, &outSize)
-        return kr == KERN_SUCCESS && output[Self.offResult] == 0
-    }
-
-    /// 写 fpe2 风扇值（UInt16 大端，如目标转速）
-    @discardableResult
-    func writeFpe2(_ name: String, value: Double) -> Bool {
-        let v = UInt16(max(0, min(65535, value)))
-        return writeRaw(name, data: [UInt8(v >> 8), UInt8(v & 0xff)])
+        return (kr == KERN_SUCCESS && output[Self.offResult] == 0, kr)
     }
 
     // MARK: 键枚举（全量传感器发现）
@@ -218,22 +218,49 @@ final class SmcClient {
         return Double(UInt16(r.data[0]) << 8 | UInt16(r.data[1])) / 4.0
     }
 
-    /// 风扇模式：0=系统自动，1=手动
+    /// 风扇模式：0=系统自动，1=手动。
+    /// 注意：FS! 是多字节类型（本机实测 ui16/2B 大端），必须读**最后一个字节**；
+    /// 读首字节在 ui16/flag 机型上会永远显示"自动"。
     var fanMode: Int {
-        guard let r = readRaw("FS! "), r.data.count >= 1 else { return 0 }
-        return Int(r.data[0])
+        guard let r = readRaw("FS! "), !r.data.isEmpty else { return 0 }
+        return Int(r.data[r.data.count - 1])
     }
 
-    /// 切换风扇模式（false=系统自动，true=手动）
+    /// 切换风扇模式（false=系统自动，true=手动）。
+    /// FS! 尺寸随机型不同（本机实测 ui16/2B；其他机型有 flag/4B、ui8/1B），
+    /// 先取 GetKeyInfo 真实 size，按大端在末字节写 1/0。
+    /// 曾因固定只写 1 字节、与 ui16 尺寸不匹配被 SMC 拒绝，导致手动模式从未生效。
     @discardableResult
     func setFanMode(manual: Bool) -> Bool {
-        writeRaw("FS! ", data: [manual ? 1 : 0])
+        setFanModeStatus(manual: manual).ok
     }
 
-    /// 设置第 i 个风扇目标转速（手动模式生效）
+    /// 同 setFanMode，返回原始 IOReturn（区分权限不足与其他失败）
+    func setFanModeStatus(manual: Bool) -> (ok: Bool, kr: kern_return_t) {
+        let key = Self.fourCC("FS! ")
+        guard let info = call(command: 9, key: key) else { return (false, kIOReturnNotFound) }
+        let size = Int(info[Self.offDataSize])
+        guard size >= 1, size <= 4 else { return (false, kIOReturnBadArgument) }
+        var data = [UInt8](repeating: 0, count: size)
+        data[size - 1] = manual ? 1 : 0
+        return writeRawStatus("FS! ", data: data)
+    }
+
+    /// 设置第 i 个风扇目标转速（手动模式生效；fpe2 编码 = rpm×4）
     @discardableResult
     func setFanTarget(_ i: Int, rpm: Double) -> Bool {
-        writeFpe2("F\(i)Tg", value: rpm)
+        setFanTargetStatus(i, rpm: rpm).ok
+    }
+
+    /// 同 setFanTarget，返回原始 IOReturn（区分权限不足与其他失败）
+    func setFanTargetStatus(_ i: Int, rpm: Double) -> (ok: Bool, kr: kern_return_t) {
+        writeFpe2Status("F\(i)Tg", value: rpm)
+    }
+
+    private func writeFpe2Status(_ name: String, value: Double) -> (ok: Bool, kr: kern_return_t) {
+        let scaled = max(0, min(16383, value))
+        let v = UInt16(scaled * 4)
+        return writeRawStatus(name, data: [UInt8(v >> 8), UInt8(v & 0xff)])
     }
 
     // MARK: 解析工具

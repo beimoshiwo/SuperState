@@ -20,6 +20,23 @@ struct ChangelogView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    // ===== 驱动（SuperStateKext）更新记录：逐版本 + 详细原因 =====
+                    kextSection
+
+                    Divider().padding(.vertical, 2)
+
+                    changelog("1.0.15", [
+                        "稳定性加固：系统休眠期间与唤醒后 5 秒过渡窗口内暂停 kext 硬件读取——OCLP 环境 GPU 驱动补丁不成熟，睡眠唤醒时 GPU 电源态剧烈切换，此时不碰设备内存（期间温度/风扇/功耗走 SMC 免授权兜底，功能不中断）",
+                        "驱动更新记录区补全 v1–v4 历史：从 2026-10-12 首个版本（单位错误 / mp_cpus_call / dispatch 表 / 版本握手）起的完整脉络",
+                    ])
+                    changelog("1.0.14", [
+                        "新增「CPU-Z」硬件信息区：处理器（型号/代号/工艺/TDP/睿频/缓存/指令集/封装）、主板（机型/固件/SMC/序列号/UUID）、内存（类型/速率/插槽）、SPD（每槽位容量/厂商/物料号）、显卡（显存/实时占用/温度/功耗/频率）；macOS 不提供的字段（如 SPD 详细时序）如实标注，不做猜测",
+                        "新增系统级全局快捷键：⌘M 打开主界面 / ⌘⌥P 状态面板 / ⌘⌥F 网速悬浮窗（Carbon 热键，无需辅助功能权限，无需 App 在前台）",
+                        "【关键修复】风扇调节真正生效：此前「装饰化」的根因是 macOS 对 SMC 写通道有权限保护（非特权进程写入一律被拒，界面静默失败），另有两个编码 bug（FS! 实际为 16 位、旧代码只写 1 字节导致手动模式从未开启；fpe2 目标值漏乘 4 导致转速只有 1/4）",
+                        "风扇写入改为两级策略：免授权直连优先，被拒时经管理员授权执行（首次调节需输入密码，之后约 5 分钟内不再提示）；拖动滑杆自动合并请求",
+                        "新增过热安全护栏：手动控扇期间 CPU/GPU 达到 95°C 自动恢复系统风扇模式；退出 App 同步恢复自动（失败时系统通知提醒）",
+                        "更新日志新增「驱动（SuperStateKext）更新记录」区：逐版本改动与详细原因",
+                    ])
                     changelog("1.0.13", [
                         "工具页明确标注：驱动已内置在 App 内，分享 App 即可，对方一次点击安装使用",
                     ])
@@ -104,6 +121,85 @@ struct ChangelogView: View {
             }
         }
         .frame(width: 460, height: 480)
+    }
+
+    // MARK: 驱动（kext）更新记录
+
+    private var kextSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "cpu.fill")
+                Text("驱动（SuperStateKext）更新记录").font(.headline)
+            }
+            Text("硬件监控内核扩展的逐版本改动与详细原因（v1 始于 2026-10-12）；接口版本与 App 期望版本需一致才会显示「已就绪」。")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            kextEntry("v9 · 接口 9 / 1.0.9", highlight: true, [
+                "重新启用核显实时频率（方法 3），并把安全逻辑做扎实：每次重新取「当前」BAR0 + 双重电源态守卫 + 显式拒绝 0xFFFFFFFF/越界，绝不持有旧映射",
+                "原因：v8 一刀切禁用虽稳但丢了功能；按「稳定与功能都要」重做",
+            ])
+            kextEntry("v8 · 接口 8 / 1.0.8", [
+                "默认禁用方法 3（iGPU MMIO 读取）",
+                "原因：审计确认它是 kext 里唯一的设备内存访问，存在无法彻底消除的 TOCTOU 竞态（电源态在检查后、读取前可能被切换 → 读失效映射 → PCIe 错误 → panic），过度保守地关掉以求绝对稳",
+            ])
+            kextEntry("v7 · 接口 7 / 1.0.7", highlight: true, [
+                "【关键修复】根治导致系统五国语言重启的内核 panic",
+                "根因：方法 0/1 高频调用 rdmsr_carefully 读 MSR；本机 i7-3615QM 无 DRAM RAPL（0x619），每次读必 #GP，高频 fault+recovery 在抢占交错下写坏内核栈指针 → kernel stack overflow",
+                "修复：启动时一次性探测各 MSR 是否存在；热路径只对已确认存在的 MSR 用「裸 rdmsr」，彻底不走 recovery 机制",
+            ])
+            kextEntry("v6 · 接口 6 / 1.0.6", [
+                "方法 3 改为每次调用重新定位 iGPU + 电源态守卫 + 用完立即释放（后被取证证明并非 panic 元凶，但保留更安全）",
+            ])
+            kextEntry("v5 · 接口 5 / 1.0.5", [
+                "新增方法 3：核显（Intel HD Graphics）实时频率，只读图形 MMIO 的 GEN6_RPSTAT1",
+                "移除 IOPCIDevice 依赖（该族符号第三方 kext 不可绑定、装不上）：改经 IOService 属性与虚方法取 BAR0",
+            ])
+            kextEntry("v4 · 接口 4 / 1.0.4", [
+                "【关键修复】RAPL 能量单位读错位：ESU 在 bits 12:8（IVB 实测 14），此前误读 bits 3:0，功耗数值放大约 1.6 万倍（界面显示 23 万 W）；修复后实测整机 27.8W / CPU 核心 13.4W / 核显 8.0W",
+                "打包流程改为每次强制重建 kext：此前「目录存在就跳过重建」导致修好的源码一直打包着旧的 v1 二进制（单位仍错、无版本接口）",
+            ])
+            kextEntry("v3 · 接口 3 / 1.0.3", [
+                "修复 IOExternalMethodDispatch 字段顺序错误（结构输出大小被写成 0 → 方法 0/1 全部返回 kIOReturnBadArgument，action 根本未被调用）",
+                "新增方法 2 版本握手 + App 三态识别（未安装 / 旧版 / 就绪），杜绝旧驱动被误判为最新；新增卸载驱动脚本与入口",
+            ])
+            kextEntry("v2 · 接口 2 / 1.0.2", [
+                "修复 mp_cpus_call 无法绑定（现代 macOS 不再向第三方 kext 导出该 KPI）→ 改为只读「当前 CPU」MSR，App 侧用线程亲和性轮流绑定各逻辑 CPU 采集",
+                "新增 CPUID 白名单：仅 SNB/IVB/HSW 启用 MSR 读取，其余机型直接返回不支持，避免误读触发 #GP",
+            ])
+            kextEntry("v1 · 接口 1", [
+                "首个版本（2026-10-12，随 App 1.0.7 诞生）：方法 0 逐逻辑 CPU 实时频率（MSR 0x198 倍频）+ 方法 1 RAPL 能量计数（整机 / CPU 核心 / 核显 GT / DRAM），全程只读不写",
+                "自带 _kmod_info 符号解决经典 kext 加载；已知缺陷：能量单位读错位（v4 修复）、无版本握手接口（v3 补上）",
+            ])
+        }
+    }
+
+    private func kextEntry(_ version: String, highlight: Bool = false, _ items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(version).font(.callout.bold().monospacedDigit())
+                if highlight {
+                    Text("关键").font(.caption2.bold())
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.18), in: Capsule())
+                        .foregroundStyle(.orange)
+                }
+            }
+            ForEach(items, id: \.self) { item in
+                HStack(alignment: .top, spacing: 6) {
+                    Text("·").font(.caption).foregroundStyle(.tertiary)
+                    Text(item).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.accentColor.opacity(highlight ? 0.5 : 0.0), lineWidth: 1)
+        )
     }
 
     private func changelog(_ version: String, _ items: [String]) -> some View {

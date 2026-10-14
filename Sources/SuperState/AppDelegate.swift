@@ -9,21 +9,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // 隐藏 CLI：被 osascript 以管理员身份重执行时运行风扇写入，完成后直接退出。
+        // 必须用 exit() 而非 NSApp.terminate()——后者会触发 applicationWillTerminate
+        // 的恢复自动逻辑，把刚设置的手动模式又改回去。
+        if let idx = CommandLine.arguments.firstIndex(of: "--fan") {
+            FanCLI.run(Array(CommandLine.arguments[(idx + 1)...]))
+            return   // FanCLI 内部 exit()，不会到达这里
+        }
+
         Alerts.shared.requestPermission()
         Monitor.shared.start()
         StatusItemController.shared.setup()
+        GlobalHotkeyManager.shared.register()   // 系统级全局热键（⌘M 打开主界面 / ⌘⌥P 状态面板 / ⌘⌥F 网速悬浮窗）
+        observeSleepWake()                      // 睡眠/唤醒期间暂停 kext 读取（GPU 电源态 churn 护栏）
         // 后台一次性采集静态硬件信息（供「硬件参数」页展示）
         MemoryProbe.shared.load()
         HardwareInfo.shared.load()
+    }
+
+    /// 睡眠/唤醒观察：系统睡眠期间 + 唤醒后过渡窗口内暂停 kext 硬件读取。
+    /// 原因：本机 OCLP 3.0 内测版 GPU 驱动补丁不成熟，休眠→唤醒时 GPU 电源态剧烈切换，
+    /// 方法 3（iGPU MMIO）的 TOCTOU 竞态在此窗口暴露最大。暂停只影响 kext 读数
+    /// （界面降级为 SMC/标称值兜底），SMC 温度/风扇/功耗等免授权通道不受影响。
+    private func observeSleepWake() {
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
+            KextMetrics.shared.setSleeping(true)
+        }
+        nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+            KextMetrics.shared.setSleeping(false)
+            KextMetrics.shared.extendWakeSettle(5)   // 等 GPU 驱动重初始化完成再恢复读 MMIO
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
 
-    /// 退出前恢复系统自动风扇（手动控扇的安全兜底，防止残留低转速过热）
+    /// 退出前恢复系统自动风扇（手动控扇的安全兜底，防止残留低转速过热）。
+    /// 必须同步等待：SMC 写通道受权限保护，可能要弹一次管理员授权框；
+    /// 异步链会在 App 退出时被杀掉。取消/失败时发通知提醒用户。
     func applicationWillTerminate(_ notification: Notification) {
-        FeaturesView.restoreAuto()
+        let (ok, msg) = SmcFanWriter.shared.restoreAutoSync()
+        if !ok {
+            Alerts.shared.postNow(title: "风扇仍处于手动模式",
+                                  body: msg ?? "退出时未能恢复系统自动风扇，重启电脑或重新打开 SuperState 可恢复。")
+        }
     }
 }
 
@@ -125,6 +156,9 @@ enum SelfCheck {
         }
         if let m = MemoryProbe.shared.info {
             print("内存: \(m.type ?? "–") \(m.speedMTs.map { "\($0) MT/s" } ?? "–")  \(m.slotText)")
+            for d in m.dimms {
+                print("  SPD \(d.bank): \(d.sizeText ?? "–") \(d.type ?? "–") \(d.speedMTs.map { "\($0) MT/s" } ?? "–")  厂商 \(d.manufacturer ?? d.manufacturerCode ?? "–")  物料号 \(d.partNumber ?? "–")  状态 \(d.status ?? "–")")
+            }
         }
         print("== SelfCheck DONE ==")
     }

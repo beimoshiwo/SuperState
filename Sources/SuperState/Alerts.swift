@@ -41,6 +41,17 @@ final class Alerts {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
 
+    /// 立即发送一条通知（安全关键事件用，不受启用开关与冷却限制）
+    func postNow(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "superstate.now.\(Date().timeIntervalSince1970)",
+                                            content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
     func check(_ s: SystemSnapshot) {
         guard enabled else { return }
         var items: [(key: String, title: String, body: String)] = []
